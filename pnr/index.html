@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SAS Booking Link Generator</title>
+    <link rel="stylesheet" href="style.css?ts=202312345465">
+</head>
+<body>
+
+    <div class="container">
+        <h2>SAS Booking Lookup</h2>
+
+        <label for="bookingRef">Booking Reference (6 characters)</label>
+        <input type="text" id="bookingRef" maxlength="6" placeholder="ABC123">
+
+        <label for="lastName">Last Name</label>
+        <input type="text" id="lastName" placeholder="Peterson">
+
+        <button id="generateBtn">Generate Link</button>
+
+        <div id="result"></div>
+        <p><a href="https://brekkemedia.no/pnr2/" target="_blank"> Paste the content you get from above link in to this page</a></p>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SAS Booking Viewer</title>
+
+<style>
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #f2f4f7;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+    }
+
+    #app {
+        width: 390px;
+        padding: 16px;
+    }
+
+    .sas-header {
+        color: #00205B;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 16px;
+    }
+
+    textarea {
+        width: 100%;
+        height: 140px;
+        border-radius: 8px;
+        border: 1px solid #ccc;
+        padding: 10px;
+        font-size: 14px;
+        box-sizing: border-box;
+    }
+
+    button {
+        width: 100%;
+        background: #00205B;
+        color: white;
+        padding: 12px;
+        border: none;
+        border-radius: 8px;
+        margin-top: 10px;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    button:hover {
+        background: #00358f;
+    }
+
+    .card {
+        background: white;
+        border-radius: 12px;
+        padding: 14px;
+        margin-top: 14px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    }
+
+    .card h3 {
+        margin-top: 0;
+        color: #00205B;
+    }
+
+    .flight-header {
+        font-size: 16px;
+        font-weight: 700;
+        color: #00205B;
+        margin-bottom: 4px;
+    }
+
+    .airports {
+        font-size: 20px;
+        font-weight: 700;
+        margin-bottom: 4px;
+    }
+
+    .small {
+        font-size: 13px;
+        color: #555;
+    }
+
+    details summary {
+        cursor: pointer;
+        margin-top: 20px;
+        font-weight: 600;
+    }
+
+    pre {
+        font-size: 11px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+</style>
+</head>
+
+<body>
+<div id="app">
+
+    <h2 class="sas-header">SAS Booking Viewer</h2>
+
+    <textarea id="jsonInput" placeholder="Paste SAS JSON here"></textarea>
+
+    <button id="parseBtn" type="button">Parse JSON</button>
+
+    <div id="prettyOutput"></div>
+
+    <details id="devMode">
+        <summary>Developer Mode</summary>
+        <pre id="devOutput"></pre>
+    </details>
+
+</div>
+
+<script>
+function safe(obj, path, fallback = "—") {
+    try {
+        const val = path.split(".").reduce((o, k) => o[k], obj);
+        return val === undefined || val === null ? fallback : val;
+    } catch {
+        return fallback;
+    }
+}
+
+
+/* -----------------------------------------
+   Reservation status helpers
+-------------------------------------------- */
+
+function getSegmentReservationStatus(segment, data, ctx) {
+
+    // Map modern segment.id -> legacy FS_x
+    const legacyKey = ctx.legacyKeyById[String(segment.id)];
+
+    if (!legacyKey) return null;
+
+    const statusDetails = safe(
+        data,
+        "LEGACY.status.statusDetails",
+        null
+    );
+
+    if (!statusDetails || typeof statusDetails !== "object") {
+        return null;
+    }
+
+    // Loop passengers: P_1_ADT etc.
+    for (const paxKey in statusDetails) {
+
+        const segmentStatuses = safe(
+            statusDetails,
+            `${paxKey}.reservationStatus.${legacyKey}`,
+            null
+        );
+
+        if (
+            segmentStatuses &&
+            typeof segmentStatuses === "object"
+        ) {
+
+            // HX / HK / TK etc.
+            const statusCode = Object.keys(segmentStatuses)[0];
+
+            if (statusCode) {
+                return segmentStatuses[statusCode];
+            }
+        }
+    }
+
+    return null;
+}
+
+function getSegmentStatusName(segment, data, ctx) {
+    return safe(
+        getSegmentReservationStatus(segment, data, ctx),
+        "name"
+    );
+}
+
+function getSegmentBookingClass(segment, data, ctx) {
+    return safe(
+        getSegmentReservationStatus(segment, data, ctx),
+        "bookingClass"
+    );
+}
+
+function getSegmentFareClass(segment, data, ctx) {
+    return safe(
+        getSegmentReservationStatus(segment, data, ctx),
+        "fareClass"
+    );
+}
+
+function getSegmentServiceClass(segment, data, ctx) {
+    return safe(
+        getSegmentReservationStatus(segment, data, ctx),
+        "serviceClass"
+    );
+}
+
+function getSegmentServiceClassName(segment, data, ctx) {
+    return safe(
+        getSegmentReservationStatus(segment, data, ctx),
+        "serviceClassName"
+    );
+}
+
+function getSegmentFsNumber(segment, ctx) {
+
+    if (!ctx || !ctx.legacyKeyById) return "N/A";
+
+    return ctx.legacyKeyById[String(segment.id)] || "N/A";
+}
+
+/* -----------------------------------------
+   Segment ancillary helpers
+-------------------------------------------- */
+
+function getPassengerByKey(data, paxKey) {
+
+    return (data.LEGACY.passengersArray || []).find(
+        p => p.uId === paxKey
+    );
+}
+
+function getPassengerNameByKey(data, paxKey) {
+
+    const pax = getPassengerByKey(data, paxKey);
+
+    if (!pax) return paxKey;
+
+    return `${safe(pax, "firstName")} ${safe(pax, "lastName")}`;
+}
+
+
+/* -----------------------------------------
+   Seats for segment
+-------------------------------------------- */
+
+function getSeatsForSegment(fsNumber, data) {
+
+    const result = [];
+
+    (data.LEGACY.ancillaryProducts || []).forEach(product => {
+
+        if (product.name !== "seat") return;
+
+        (product.connections || []).forEach(conn => {
+
+            (conn.segments || []).forEach(seg => {
+
+                if (seg.id !== fsNumber) return;
+
+                (seg.passengers || []).forEach(pax => {
+
+                    result.push({
+                        passengerKey: pax.id,
+                        passengerName: getPassengerNameByKey(data, pax.id),
+                        seat: safe(pax, "allowance.number")
+                    });
+
+                });
+
+            });
+
+        });
+
+    });
+
+    return result;
+}
+
+
+/* -----------------------------------------
+   Baggage for segment
+-------------------------------------------- */
+
+function getBaggageForSegment(fsNumber, data) {
+
+    const result = [];
+
+    (data.LEGACY.ancillaryProducts || []).forEach(product => {
+
+        if (product.name !== "baggage") return;
+
+        (product.connections || []).forEach(conn => {
+
+            (conn.segments || []).forEach(seg => {
+
+                if (seg.id !== fsNumber) return;
+
+                (seg.passengers || []).forEach(pax => {
+
+                    const bag = safe(
+                        pax,
+                        "allowance.checkinBaggage",
+                        null
+                    );
+
+                    if (!bag) return;
+
+                    result.push({
+                        passengerKey: pax.id,
+                        passengerName: getPassengerNameByKey(data, pax.id),
+                        baseAllowance: safe(bag, "baseAllowance"),
+                        tierAllowance: safe(bag, "tierAllowance"),
+                        total: safe(bag, "total"),
+                        concept: safe(bag, "concept"),
+                        maxValuePerUnit: safe(bag, "maxValuePerUnit"),
+                        unitType: safe(bag, "unitType")
+                    });
+
+                });
+
+            });
+
+        });
+
+    });
+
+    return result;
+}
+
+
+/* -----------------------------------------
+   FQTV / EuroBonus for segment
+-------------------------------------------- */
+
+function getFqtvForSegment(fsNumber, data) {
+
+    const result = [];
+
+    (data.LEGACY.passengersArray || []).forEach(pax => {
+
+        const eurobonusList = safe(
+            pax,
+            "engagements.euroBonus",
+            []
+        );
+
+        eurobonusList.forEach(eb => {
+
+            const associatedSegments =
+                safe(eb, "associatedFlightSegments", []);
+
+            if (!associatedSegments.includes(fsNumber)) return;
+
+            result.push({
+                passengerKey: pax.uId,
+                passengerName: `${safe(pax, "firstName")} ${safe(pax, "lastName")}`,
+                number: safe(eb, "id"),
+                tierCode: safe(eb, "airline.code"),
+                tierName: safe(eb, "airline.name"),
+                alliance: safe(eb, "alliance.name")
+            });
+
+        });
+
+    });
+
+    return result;
+}
+
+
+/* -----------------------------------------
+   Ticketing engine:
+   - legacyKeyById: modern id -> legacy FS_x
+   - ticketedSegments: FS_x from LEGACY.documentInformation.*.flights[0].associatedFlightSegments
+-------------------------------------------- */
+/* old function buildTicketingContext(data)
+
+function buildTicketingContext(data) {
+    const legacyKeyById = {};
+    const ticketedSegments = new Set();
+
+    // 1. Modern id -> legacy FS_x mapping from LEGACY.connectionsArray
+    if (data.LEGACY?.connectionsArray) {
+        data.LEGACY.connectionsArray.forEach(conn => {
+            (conn.segments || []).forEach(seg => {
+                if (seg.id != null && seg.segmentKey) {
+                    legacyKeyById[String(seg.id)] = seg.segmentKey;
+                }
+            });
+        });
+    }
+
+    // 2. Ticketed segments from LEGACY.documentInformation
+    if (data.LEGACY?.documentInformation) {
+        for (const paxKey in data.LEGACY.documentInformation) {
+            const paxDoc = data.LEGACY.documentInformation[paxKey];
+            if (!paxDoc || !Array.isArray(paxDoc.flights) || paxDoc.flights.length === 0) continue;
+
+            const flight = paxDoc.flights[0]; // always one flight object per passenger
+            const assoc = flight.associatedFlightSegments || [];
+
+            assoc.forEach(segKey => {
+                if (segKey) ticketedSegments.add(segKey);
+            });
+        }
+    }
+    
+    return { legacyKeyById, ticketedSegments };
+}
+
+*/
+function buildTicketingContext(data) {
+    const legacyKeyById = {};
+    const ticketedSegments = new Set();
+
+    // 1. Modern id -> legacy FS_x mapping from LEGACY.connectionsArray
+    if (data.LEGACY?.connectionsArray) {
+        data.LEGACY.connectionsArray.forEach(conn => {
+            (conn.segments || []).forEach(seg => {
+                if (seg.id != null && seg.segmentKey) {
+                    legacyKeyById[String(seg.id)] = seg.segmentKey;
+                }
+            });
+        });
+    }
+
+    // 2. Ticketed segments from ALL flights in LEGACY.documentInformation
+    if (data.LEGACY?.documentInformation) {
+        for (const paxKey in data.LEGACY.documentInformation) {
+            const paxDoc = data.LEGACY.documentInformation[paxKey];
+            if (!paxDoc || !Array.isArray(paxDoc.flights)) continue;
+
+            paxDoc.flights.forEach(flight => {
+                const assoc = flight?.associatedFlightSegments || [];
+                assoc.forEach(segKey => {
+                    if (segKey) ticketedSegments.add(segKey);
+                });
+            });
+        }
+    }
+
+    return { legacyKeyById, ticketedSegments };
+}
+
+
+
+/* -----------------------------------------
+   Determine ticketing status:
+   - Ticketed if legacy FS_x is in ticketedSegments
+-------------------------------------------- */
+function getSegmentTicketStatus(segment, ctx) {
+    const idStr = String(segment.id);
+    const legacyKey = ctx.legacyKeyById[idStr];
+
+    if (!legacyKey) return "Unknown";
+
+    return ctx.ticketedSegments.has(legacyKey)
+        ? "Ticketed"
+        : "Not ticketed";
+}
+
+
+function getPaxList(data)
+{
+    const paxKeyById = {};
+    (data.LEGACY.passengersArray).forEach(p =>{
+        paxKeyById[p.id] = p.uId
+
+    })
+    console.log(paxKeyById)
+
+}
+/*
+function getPaxNameFromId(data, paxId){
+    (data.LEGACY.passengersArray || []).forEach(p =>{
+        
+        console.log(`p.id: ${p.id}`)
+        console.log(`p.fullName: ${p.fullName}`)
+        if (p.id == paxId){
+            console.log(`p.id: ${p.id} ${p.fullName} true`)
+            return String(p.fullName)
+            
+        }
+        return "N/A"
+
+    })   
+}
+*/
+function getPaxNameFromId(data, paxId) {
+    for (const p of (data.LEGACY.passengersArray || [])) {
+        console.log(`p.id: ${p.id}`)
+        console.log(`p.fullName: ${p.fullName}`)
+
+        if (p.id == paxId) {
+            console.log(`p.id: ${p.id} ${p.fullName} true`)
+            return String(p.fullName)
+        }
+    }
+    return "N/A"
+}
+
+function formatTimestamp(ts) {
+    if (!ts) return "";
+
+    const d = new Date(ts);
+
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+
+    const hours = String(d.getHours()).padStart(2, "0");
+    const minutes = String(d.getMinutes()).padStart(2, "0");
+
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
+function formatDuration(isoDuration) {
+    if (!isoDuration || typeof isoDuration !== "string") return "";
+
+    // Extract hours and minutes using regex
+    const hoursMatch = isoDuration.match(/(\d+)H/);
+    const minutesMatch = isoDuration.match(/(\d+)M/);
+
+    const hours = hoursMatch ? Number(hoursMatch[1]) : 0;
+    const minutes = minutesMatch ? Number(minutesMatch[1]) : 0;
+
+    // Build output
+    if (hours > 0 && minutes > 0) {
+        return `${hours}h ${minutes}min`;
+    }
+    if (hours > 0) {
+        return `${hours}h`;
+    }
+    return `${minutes}min`;
+}
+
+function formatServiceClass(serviceClass) {
+    if (serviceClass === "C") {
+        return `<span style="color:#855998;font-weight:bold;">${serviceClass}</span>`;
+    } else if (serviceClass === "M") {
+        return `<span style="color:#429364;font-weight:bold;">${serviceClass}</span>`;
+    }
+    else if (serviceClass === "W") {
+        return `<span style="color:#5591ba;font-weight:bold;">${serviceClass}</span>`;
+    }
+    else if (serviceClass === "F") {
+        return `<span style="color:#d65a4d;font-weight:bold;">${serviceClass}</span>`;
+    }
+    else{
+        return serviceClass;
+    }
+
+    return status;
+}
+
+function calculateDuration(startDuration, endDuration) {
+    const start = new Date(startDuration);
+    const end = new Date(endDuration);
+
+    let diffMs = end - start;
+    const isNegative = diffMs < 0;
+
+    // Work with absolute value for calculations
+    diffMs = Math.abs(diffMs);
+
+    const totalMinutes = Math.floor(diffMs / (1000 * 60));
+
+    const days = Math.floor(totalMinutes / (60 * 24));
+    const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+    const minutes = totalMinutes % 60;
+
+    const parts = [];
+
+    if (days > 0) {
+        parts.push(`${days}d`);
+    }
+
+    if (hours > 0 || days > 0) {
+        parts.push(`${hours}h`);
+    }
+
+    parts.push(`${minutes}m`);
+
+    let result = parts.join(" ");
+
+    if (isNegative) {
+        result = `-${result} IMPOSSIBLE`;
+    }
+
+    return result;
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("parseBtn").addEventListener("click", () => {
+        const raw = document.getElementById("jsonInput").value.trim();
+        if (!raw) return alert("Paste JSON first");
+
+        let json;
+        try { json = JSON.parse(raw); }
+        catch { return alert("Invalid JSON"); }
+
+        renderPretty(json);
+        renderDev(json);
+    });
+});
+
+function renderDev(json) {
+    document.getElementById("devOutput").textContent =
+        JSON.stringify(json, null, 2);
+}
+
+
+function renderPretty(json) {
+    const data = json.data;
+    let html = "";
+
+    const ticketCtx = buildTicketingContext(data);
+    const paxList = (getPaxList(data));
+    console.log(paxList);
+    //console.log(`PAX2:   ${getPaxNameFromId(data, 2)}`);
+    console.log(getPaxNameFromId(data, 2))
+    const fqtrAncillaries = data.ancillaries?.filter(
+        a => a.id === "FQTR"
+        ) || [];
+
+    function getFQTR(passenger, segment) {
+
+          const ancillary = fqtrAncillaries.find(a =>
+            a.passengerId === passenger.id &&
+            a.segmentIds.includes(String(segment.id))
+          );
+
+          if (!ancillary) return null;
+
+          return passenger.frequentTravelers?.find(
+            ft => ft.ssrType === "FQTR"
+          ) || null;
+        }
+    
+
+    function getFQTRForSegment(segment, data) {
+
+    const passengers = data.passengers || [];
+
+    return passengers
+        .map(passenger => {
+
+            const ancillary = fqtrAncillaries.find(a =>
+                a.passengerId === passenger.id &&
+                a.segmentIds.includes(String(segment.id))
+            );
+
+            if (!ancillary) return null;
+
+            const fqtr = passenger.frequentTravelers?.find(
+                ft => ft.ssrType === "FQTR"
+            );
+
+            if (!fqtr) return null;
+
+            return {
+                passengerName:
+                    `${passenger.firstName} ${passenger.lastName}`,
+                number: fqtr.number,
+                tier: fqtr.tier,
+                carrier: fqtr.carrier
+            };
+        })
+        .filter(Boolean);
+        }
+
+        function formatFlightStatus(status) {
+            if (status === "Cancelled") {
+                return `<span style="color:red;font-weight:bold;">${status}</span>`;
+            }
+        
+            if (status === "Active") {
+                return `<span style="color:green;font-weight:bold;">${status}</span>`;
+            }
+        
+            return status;
+        }
+        
+
+
+
+    /* -----------------------------
+       PASSENGERS
+    ----------------------------- */
+    html += `<div class="card"><h3>👤 Passengers</h3>`;
+    (data.LEGACY.passengersArray || []).forEach(p => {
+        html += `
+            <div style="margin-bottom:10px;">
+                <strong>${safe(p, "firstName")} ${safe(p, "lastName")}</strong><br>
+                Number: ${safe(p, "id")},  (${safe(p, "uId")}) <br>
+                Type: ${safe(p, "type.name")}  (${safe(p, "type.code")}) <br>
+                Gender: ${safe(p, "gender.name")}  (${safe(p, "gender.code")})<br>
+                Date of birth: ${safe(p, "advancePassengerInformation.personalInformation.dateOfBirth")}<br>
+                
+            </div>
+        `;
+    });
+    html += `</div>`;
+
+
+/* -----------------------------
+   ALL FLIGHTS (simple list)
+----------------------------- */
+html += `<div class="card"><h3>✈️ All Flights</h3>`;
+
+(data.LEGACY.connectionsArray || []).forEach(conn => {
+    let lastAirport = ""
+    let lastArrivalTime = ""
+    
+    (conn.segments || []).forEach(seg => {
+
+        const depDate = new Date(seg.scheduledDepartureLocal);
+        const arrDate = new Date(seg.scheduledArrivalLocal);
+        const marketingCarrier = safe(seg, "marketingCarrier.code");
+        const operatingCarrier = safe(seg, "operatingCarrier.code");
+        const airlineLogoPath = "icons/" + marketingCarrier + ".png";
+        const ticketStatus = getSegmentTicketStatus(seg, ticketCtx);
+        const serviceClass = getSegmentServiceClass(seg, data, ticketCtx);
+        const months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Des"
+        ];
+
+        function formatShortDate(date) {
+            return `${date.getDate()}. ${months[date.getMonth()]}`;
+        }
+
+        function formatShortTime(date) {
+            return date.toLocaleTimeString("no-NO", {
+                hour: "2-digit",
+                minute: "2-digit"
+            });
+        }
+
+        html += `
+            <div style="margin-bottom:8px;">
+                Layover ${lastAirport}: ${calculateDuration(lastArrivalTime,depDate)} <br>
+                <img src="${airlineLogoPath}" alt="" width="20" height="20">
+                <strong>${safe(seg, "departure.airportCode")}
+                -
+                ${safe(seg, "arrival.airportCode")}</strong>
+                -
+                ${formatServiceClass(serviceClass)}
+                
+                
+                -
+                ${safe(seg, "marketingCarrier.code")}
+                ${safe(seg, "marketingCarrier.flightNumber")}
+                
+                -
+                
+                ${formatShortDate(depDate)}
+                ${formatShortTime(depDate)}
+                
+                -
+                
+                ${formatShortDate(arrDate)}
+                ${formatShortTime(arrDate)}
+                -
+                ${safe(seg, "segmentKey")}
+                -
+
+                
+                
+                ${formatFlightStatus(safe(seg, "status"))}
+                -
+                        <strong>${
+            ticketStatus === "Ticketed"
+                ? `<span style="color:green;">Ticketed</span>`
+                : `<span style="color:red;">Not Ticketed</span>`
+        }</strong>
+        <br>———————————————————————
+            </div>
+        `;
+        lastAirport = safe(seg, "arrival.airportCode")
+        lastArrivalTime = arrDate
+    });
+});
+
+html += `</div>`;
+
+
+
+
+    if (data.LEGACY.connectionsArray && data.LEGACY.connectionsArray.length) {
+        data.LEGACY.connectionsArray.forEach((conn, i) => {
+            html += `<div class="card"><h3>✈️ Connection ${i + 1}</h3>`;
+
+            conn.segments.forEach(seg => {
+                
+                //Add parameters here for booking class etc.
+                const ticketStatus = getSegmentTicketStatus(seg, ticketCtx);
+
+                const reservationStatusName =
+                    getSegmentStatusName(seg, data, ticketCtx);
+
+                const bookingClass =
+                    getSegmentBookingClass(seg, data, ticketCtx);
+
+                const fareClass =
+                    getSegmentFareClass(seg, data, ticketCtx);
+
+                const serviceClass =
+                    getSegmentServiceClass(seg, data, ticketCtx);
+
+                const serviceClassName =
+                    getSegmentServiceClassName(seg, data, ticketCtx);
+
+                const fsNumber = getSegmentFsNumber(seg, ticketCtx);
+
+
+
+                const seats = getSeatsForSegment(fsNumber, data);
+
+                const baggage = getBaggageForSegment(fsNumber, data);
+
+                const fqtv = getFqtvForSegment(fsNumber, data);
+
+                const fqtr = getFQTRForSegment(seg, data);
+
+                const marketingCarrier = safe(seg, "marketingCarrier.code");
+                const operatingCarrier = safe(seg, "operatingCarrier.code");
+                const marketingAirlineLogoPath = "icons/" + marketingCarrier + ".png";
+                const operatingAirlineLogoPath = "icons/" + operatingCarrier + ".png";
+                
+
+                html += `
+                    <div class="flight-header">
+                         <img src="${marketingAirlineLogoPath}" alt="" width="40" height="40"> <br>
+                        ${safe(seg, "marketingCarrier.code")}${safe(seg, "marketingCarrier.flightNumber")}
+                        
+                    </div>
+
+                    <div class="airports">
+                        
+                        ${safe(seg, "departure.airportCode")} → ${safe(seg, "arrival.airportCode")}
+                       
+                    </div>
+
+                    <div class="small">
+                        Dep: ${formatTimestamp(safe(seg, "scheduledDepartureLocal"))}<br>
+                        Arr: ${formatTimestamp(safe(seg, "scheduledArrivalLocal"))}<br>
+                        Duration: ${formatDuration(safe(seg, "duration"))}<br>
+                        Aircraft: ${safe(seg, "aircraft.code")} - ${safe(seg, "aircraft.name")} <br>
+                        Reservation status: ${reservationStatusName}<br>
+                        Booking class: ${bookingClass}<br>
+                        Fare class: ${fareClass}<br>
+                        Service class: ${serviceClass}<br>
+                        Service class name: ${serviceClassName}<br>
+                        FS number: ${fsNumber}<br>
+                        Marketing carrier flight number: ${safe(seg, "marketingCarrier.code")}${safe(seg, "marketingCarrier.flightNumber")}<br>
+                        Operating carrier flight number: ${safe(seg, "operatingCarrier.code")}${safe(seg, "operatingCarrier.flightNumber")}<br>
+                        Operating carrier: <img src="${operatingAirlineLogoPath}" alt="" width="15" height="15">
+                        ${safe(seg, "operatingCarrier.name")}
+                         <br>
+                        <br>
+                        Status: ${formatFlightStatus(safe(seg, "status"))}<br>
+                        <strong>Ticketing (segment): ${ticketStatus}</strong>
+                    </div>
+                    <br>
+
+                    <strong>Seats:</strong><br>
+                                    
+                    ${
+                        seats.length
+                            ? seats.map(s => `
+                                ${s.passengerName}: ${s.seat}
+                            `).join("<br>")
+                            : "No seat assignments"
+                    }
+                                    
+                    <br><br>
+                                    
+                    <strong>Baggage:</strong><br>
+                                    
+                    ${
+                        baggage.length
+                            ? baggage.map(b => `
+                                <h4>${b.passengerName}: </h4>
+                                Base Allowance: ${b.baseAllowance} ${b.concept}
+                                à ${b.maxValuePerUnit}${b.unitType} <br>
+                                Tier Allowance: ${b.tierAllowance} ${b.concept}
+                                à ${b.maxValuePerUnit}${b.unitType}<br>
+                                Total: ${b.total} ${b.concept}
+                                à ${b.maxValuePerUnit}${b.unitType}
+                            `).join("<br>")
+                            : "No baggage information"
+                    }
+                                    
+                    <br><br>
+                                    
+                    <strong>FQTV / EuroBonus:</strong><br>
+                                    
+                    ${
+                        fqtv.length
+                            ? fqtv.map(f => `
+                                ${f.passengerName}: 
+                                ${f.number}
+                                (${f.tierCode} - ${f.tierName})
+                            `).join("<br>")
+                            : "No FQTV information"
+                    }
+
+
+                    <br><br>
+
+                    <strong>FQTR:</strong><br>
+
+                    ${
+                        fqtr.length
+                            ? fqtr.map(f => `
+                                ${f.passengerName}: 
+                                ${f.number}
+                                (${f.tier} - ${f.carrier})
+                            `).join("<br>")
+                            : "No FQTR information"
+                    }
+                    <hr>
+                `;
+            });
+
+            html += `</div>`;
+        });
+    } else {
+        html += `<div class="card"><h3>✈️ Flights</h3>No flight data</div>`;
+    }
+
+
+
+    
+    /* -----------------------------
+       SEATS (LEGACY seats if present)
+    ----------------------------- */
+    html += `<div class="card"><h3>💺 Seats</h3>`;
+    let seatFound = false;
+
+    if (data.LEGACY?.ancillaryProducts) {
+        data.LEGACY.ancillaryProducts.forEach(anProd => {
+        anProd.connections.forEach(conn => {
+            conn.segments.forEach(seg => {
+                seg.passengers?.forEach(pax =>
+
+                {
+
+                    const seat = pax.allowance?.number?? "N/A"
+                    if (seat && (seat != "N/A")) {
+                    seatFound = true;
+                    html += `Segment ${seg.id}: Seat ${seat}<br>`;
+                }
+                }
+                )
+                //const seat = seg.seat || seg.seatNumber || seg.seatAssignment || seg.allowance.passengers.allowance.number;
+                
+            });
+        });
+
+    });
+    }
+
+    if (!seatFound) html += `No seat assignments available`;
+    html += `</div>`;
+
+
+
+        html += `<div class="card"><h3>Checkin Baggage Allowance</h3>`;
+    let baggageFound = false;
+
+    if (data.LEGACY?.ancillaryProducts) {
+        data.LEGACY.ancillaryProducts.forEach(anProd => {
+        anProd.connections.forEach(conn => {
+            conn.segments.forEach(seg => {
+                seg.passengers?.forEach(pax =>
+
+                {
+                    
+                    const baggage = pax.allowance?.checkinBaggage?.total?? "N/A"
+                    
+                    const baggageConcept = pax.allowance?.checkinBaggage?.concept?? "N/A"
+                    const baggageUnitType = pax.allowance?.checkinBaggage?.unitType?? "N/A"
+                    const baggageMaxValuePerUnit = pax.allowance?.checkinBaggage?.maxValuePerUnit?? "N/A"
+                    //console.log(`Pax: ${pax.id} Seg: ${seg.id}: Bag(s): ${baggage} ${baggageConcept} à ${baggageMaxValuePerUnit} ${baggageUnitType}`)
+                    if (baggage!="N/A") {
+                    baggageFound = true;
+                    html += `Pax: ${pax.id} Seg: ${seg.id}: Bag(s): ${baggage} ${baggageConcept} à ${baggageMaxValuePerUnit} ${baggageUnitType}<br>`;
+                }
+                }
+                )
+                //const seat = seg.seat || seg.seatNumber || seg.seatAssignment || seg.allowance.passengers.allowance.number;
+                
+            });
+        });
+
+    });
+    }
+
+    if (!baggageFound) html += `No baggage info available`;
+    html += `</div>`;
+
+
+    /* -----------------------------
+       METADATA
+    ----------------------------- */
+    html += `<div class="card"><h3>📄 Booking Info</h3>
+        Booking reference: ${data.LEGACY.airlineBookingReference?? "N/A"}<br>
+        Alien booking reference: ${data.LEGACY.alienBookingReference?? "N/A"}<br>
+        Created Office ID: ${data.LEGACY.createdOfficeId?? "N/A"}<br>
+        POS:  ${data.LEGACY.pos?? "N/A"}<br>
+        Created: ${data.LEGACY.category.name?? "N/A"} (${data.LEGACY.category.code?? "N/A"})<br>
+        Created: ${formatTimestamp(data.LEGACY.createdDateLocal?? "N/A")}<br>
+        Total Price (of last ticketing): ${data.LEGACY.formattedTotalPrice?? "N/A"}<br>
+        Status: ${safe(data, "reservationStatus")}<br>
+    </div>`;
+    
+            /* -----------------------------
+       Ticketing Info
+    ----------------------------- */
+
+    /*
+    html += `<div class="card"><h3>Additional info</h3>`;
+    (data.LEGACY.documentInformation || []).forEach(p => {
+        html += `
+            <div style="margin-bottom:10px;">
+                <strong>Name:</strong> ${p}<br>
+                
+                
+            </div>
+        `;
+    });
+    html += `</div>`;
+
+    */
+
+    /* -----------------------------
+       Rebook information
+    ----------------------------- */
+
+    html += `<div class="card"><h3>Rebook information</h3>`;
+    (data.LEGACY.rebookInformation || []).forEach(r => {
+        html += `
+            <div style="margin-bottom:10px;">
+                <strong>Code: </strong>${safe(r, "name")} (${safe(r, "name")})<br>
+                <strong>Date: </strong>${safe(r, "rebookedDate")}<br>
+                
+            </div>
+        `;
+    });
+    html += `</div>`;
+
+
+    /* -----------------------------
+       Notifications
+    ----------------------------- */
+
+        html += `<div class="card"><h3>Notifications</h3>`;
+    (data.LEGACY.notifications || []).forEach(n => {
+        html += `
+            <div style="margin-bottom:10px;">
+                <strong>Code: </strong>${safe(n, "code")}<br>
+                <strong>Type: </strong>${safe(n, "type")}<br>
+                <strong>Description: </strong>${safe(n, "description")}<br>
+                
+            </div>
+        `;
+    });
+    html += `</div>`;
+    /* -----------------------------
+       Additional Info
+    ----------------------------- */
+            html += `<div class="card"><h3>Additional info</h3>`;
+    (data.LEGACY.additionalInformation || []).forEach(info => {
+        html += `
+            <div style="margin-bottom:10px;">
+                <strong>Name:</strong> ${safe(info, "name")}<br>
+                <strong>Info:</strong> ${safe(info, "additionalInformation")}<br>
+                
+            </div>
+        `;
+    });
+    html += `</div>`;
+
+    document.getElementById("prettyOutput").innerHTML = html;
+}
+</script>
+
+</body>
+</html>
