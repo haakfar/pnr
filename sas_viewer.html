@@ -548,7 +548,7 @@ function formatServiceClass(serviceClass) {
         return serviceClass;
     }
 
-    return status;
+    return serviceClass;
 }
 
 function calculateDuration(startDuration, endDuration) {
@@ -582,7 +582,7 @@ function calculateDuration(startDuration, endDuration) {
     let result = parts.join(" ");
 
     if (isNegative) {
-        result = `-${result} IMPOSSIBLE`;
+        result = `<span style="color:red;font-weight:bold;">-${result} IMPOSSIBLE</span>`;
     }
 
     return result;
@@ -607,9 +607,19 @@ function renderDev(json) {
         JSON.stringify(json, null, 2);
 }
 
+let separateCancelledFlights = false;
+
+function toggleCancelledFlights() {
+    separateCancelledFlights = !separateCancelledFlights;
+
+    renderPretty(globalJsonData);
+}
+
+let globalJsonData = "";
 
 function renderPretty(json) {
     const data = json.data;
+    globalJsonData = json;
     let html = "";
 
     const ticketCtx = buildTicketingContext(data);
@@ -679,7 +689,23 @@ function renderPretty(json) {
             return status;
         }
         
+            /* -----------------------------
+       METADATA
+    ----------------------------- */
 
+    const isBookingDisrupted =  safe(data,"LEGACY.isBookingDisrupted")
+
+    html += `<div class="card"><h3>📄 Booking Info</h3>
+        Booking reference: ${data.LEGACY.airlineBookingReference?? "N/A"}<br>
+        Alien booking reference: ${data.LEGACY.alienBookingReference?? "N/A"}<br>
+        Created Office ID: ${data.LEGACY.createdOfficeId?? "N/A"}<br>
+        POS:  ${data.LEGACY.pos?? "N/A"}<br>
+        Created: ${data.LEGACY.category.name?? "N/A"} (${data.LEGACY.category.code?? "N/A"})<br>
+        Created: ${formatTimestamp(data.LEGACY.createdDateLocal?? "N/A")}<br>
+        Total Price (of last ticketing): ${data.LEGACY.formattedTotalPrice?? "N/A"}<br>
+        Status: ${safe(data, "reservationStatus")}<br>
+        Disrupted: ${isBookingDisrupted}
+    </div>`;
 
 
     /* -----------------------------
@@ -704,21 +730,61 @@ function renderPretty(json) {
 /* -----------------------------
    ALL FLIGHTS (simple list)
 ----------------------------- */
-html += `<div class="card"><h3>✈️ All Flights</h3>`;
+html += `
+<div class="card">
+
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="margin:0;">✈️ All Flights</h3>
+        ${isBookingDisrupted === true
+        ? `<button
+            onclick="toggleCancelledFlights()"
+            style="
+                padding:4px 10px;
+                border-radius:6px;
+                border:1px solid #ccc;
+                cursor:pointer;
+            "
+        >
+            ${
+                separateCancelledFlights
+                ? "Combined View"
+                : "Separate Cancelled"
+            }
+        </button>`
+        :``
+        
+        
+        }
+        
+    </div>
+`;
+
+let normalFlightsHtml = "";
+let cancelledFlightsHtml = "";
+
+let lastAirport = "init";
+let lastArrivalTime = "init";
+
+let lineBreak = "<span style='color:#CBCBCB;'>———————————————————————</span>";
 
 (data.LEGACY.connectionsArray || []).forEach(conn => {
-    let lastAirport = ""
-    let lastArrivalTime = ""
-    
+
     (conn.segments || []).forEach(seg => {
 
         const depDate = new Date(seg.scheduledDepartureLocal);
         const arrDate = new Date(seg.scheduledArrivalLocal);
+
         const marketingCarrier = safe(seg, "marketingCarrier.code");
         const operatingCarrier = safe(seg, "operatingCarrier.code");
+
         const airlineLogoPath = "icons/" + marketingCarrier + ".png";
+
         const ticketStatus = getSegmentTicketStatus(seg, ticketCtx);
         const serviceClass = getSegmentServiceClass(seg, data, ticketCtx);
+
+        const status = safe(seg, "status");
+        const isCancelled =
+            String(status).toLowerCase().includes("cancel");
         const months = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun",
             "Jul", "Aug", "Sep", "Oct", "Nov", "Des"
@@ -735,50 +801,108 @@ html += `<div class="card"><h3>✈️ All Flights</h3>`;
             });
         }
 
-        html += `
+        const segmentHtml = `
             <div style="margin-bottom:8px;">
-                Layover ${lastAirport}: ${calculateDuration(lastArrivalTime,depDate)} <br>
+
+                ${
+                    (lastAirport === "init" || (separateCancelledFlights && isCancelled))
+                    ? ``
+                    : `
+                        ${
+                            lastAirport === safe(seg, "departure.airportCode")
+                            ? `
+                                Layover ${lastAirport}: ${calculateDuration(lastArrivalTime, depDate)} <br>
+                                ${lineBreak}
+                            `
+                            : `
+                                Change of airport from ${lastAirport} to ${safe(seg, "departure.airportCode")}:
+                                ${calculateDuration(lastArrivalTime, depDate)} <br>
+                                ${lineBreak}
+                            `
+                        }
+                    `
+                }
+
                 <img src="${airlineLogoPath}" alt="" width="20" height="20">
-                <strong>${safe(seg, "departure.airportCode")}
-                -
-                ${safe(seg, "arrival.airportCode")}</strong>
-                -
-                ${formatServiceClass(serviceClass)}
-                
-                
-                -
-                ${safe(seg, "marketingCarrier.code")}
-                ${safe(seg, "marketingCarrier.flightNumber")}
-                
-                -
-                
-                ${formatShortDate(depDate)}
-                ${formatShortTime(depDate)}
-                
-                -
-                
-                ${formatShortDate(arrDate)}
-                ${formatShortTime(arrDate)}
-                -
-                ${safe(seg, "segmentKey")}
+
+                <strong>
+                    ${safe(seg, "departure.airportCode")}
+                    -
+                    ${safe(seg, "arrival.airportCode")}
+                </strong>
+
                 -
 
-                
-                
-                ${formatFlightStatus(safe(seg, "status"))}
+                ${formatServiceClass(serviceClass)}
+
                 -
-                        <strong>${
-            ticketStatus === "Ticketed"
-                ? `<span style="color:green;">Ticketed</span>`
-                : `<span style="color:red;">Not Ticketed</span>`
-        }</strong>
-        <br>———————————————————————
+
+                ${safe(seg, "marketingCarrier.code")}
+                ${safe(seg, "marketingCarrier.flightNumber")}
+
+                -
+
+                ${formatShortDate(depDate)}
+                ${formatShortTime(depDate)}
+
+                -
+
+                ${formatShortDate(arrDate)}
+                ${formatShortTime(arrDate)}
+
+                -
+
+                ${safe(seg, "segmentKey")}
+
+                -
+
+                ${formatFlightStatus(status)}
+
+                -
+
+                <strong>
+                    ${
+                        ticketStatus === "Ticketed"
+                        ? `<span style="color:green;">Ticketed</span>`
+                        : `<span style="color:red;">Not Ticketed</span>`
+                    }
+                </strong>
+
+                <br>${lineBreak}
+
             </div>
         `;
-        lastAirport = safe(seg, "arrival.airportCode")
-        lastArrivalTime = arrDate
+
+
+
+        if (separateCancelledFlights && isCancelled) {
+            cancelledFlightsHtml += segmentHtml;
+        } else {
+            normalFlightsHtml += segmentHtml;
+            lastAirport = safe(seg, "arrival.airportCode");
+            lastArrivalTime = arrDate;
+        }
+
+
     });
 });
+
+html += normalFlightsHtml;
+
+if (separateCancelledFlights && cancelledFlightsHtml) {
+
+    html += `
+        <div style="margin-top:20px;">
+
+            <h3 style="color:#cc0000;">
+                ❌ Cancelled Flights
+            </h3>
+
+            ${cancelledFlightsHtml}
+
+        </div>
+    `;
+}
 
 html += `</div>`;
 
@@ -848,7 +972,7 @@ html += `</div>`;
                         Reservation status: ${reservationStatusName}<br>
                         Booking class: ${bookingClass}<br>
                         Fare class: ${fareClass}<br>
-                        Service class: ${serviceClass}<br>
+                        Service class: ${formatServiceClass(serviceClass)}<br>
                         Service class name: ${serviceClassName}<br>
                         FS number: ${fsNumber}<br>
                         Marketing carrier flight number: ${safe(seg, "marketingCarrier.code")}${safe(seg, "marketingCarrier.flightNumber")}<br>
@@ -1000,19 +1124,7 @@ html += `</div>`;
     html += `</div>`;
 
 
-    /* -----------------------------
-       METADATA
-    ----------------------------- */
-    html += `<div class="card"><h3>📄 Booking Info</h3>
-        Booking reference: ${data.LEGACY.airlineBookingReference?? "N/A"}<br>
-        Alien booking reference: ${data.LEGACY.alienBookingReference?? "N/A"}<br>
-        Created Office ID: ${data.LEGACY.createdOfficeId?? "N/A"}<br>
-        POS:  ${data.LEGACY.pos?? "N/A"}<br>
-        Created: ${data.LEGACY.category.name?? "N/A"} (${data.LEGACY.category.code?? "N/A"})<br>
-        Created: ${formatTimestamp(data.LEGACY.createdDateLocal?? "N/A")}<br>
-        Total Price (of last ticketing): ${data.LEGACY.formattedTotalPrice?? "N/A"}<br>
-        Status: ${safe(data, "reservationStatus")}<br>
-    </div>`;
+
     
             /* -----------------------------
        Ticketing Info
