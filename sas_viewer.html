@@ -588,6 +588,179 @@ function calculateDuration(startDuration, endDuration) {
     return result;
 }
 
+
+function renderPaymentInfo(data) {
+    const payments = (data && data.LEGACY && data.LEGACY.paymentInformation) || {};
+    const keys = Object.keys(payments);
+    if (!keys.length) return `<p>No payment information available.</p>`;
+
+    let out = `<div class="payment-list">`;
+    keys.forEach(key => {
+        const p = payments[key];
+        const typeName = p.type && p.type.name ? p.type.name : (p.type && p.type.code ? p.type.code : "Unknown");
+        out += `<div class="payment-item"><strong>${key}</strong> — <em>${escapeHtml(typeName)}</em><div class="payment-details">`;
+
+        // Credit card details
+        if (p.creditCard) {
+            const issuer = p.creditCard.issuer && p.creditCard.issuer.name ? p.creditCard.issuer.name : (p.creditCard.issuer && p.creditCard.issuer.code ? p.creditCard.issuer.code : "");
+            const acct = p.creditCard.accountNumber || "";
+            out += `<div>Method: <strong>Credit Card</strong></div>`;
+            if (issuer) out += `<div>Issuer: ${escapeHtml(issuer)}</div>`;
+            if (acct) out += `<div>Account: ${escapeHtml(acct)}</div>`;
+        }
+
+        // EuroBonus / points style
+        if (p.ebPoints) {
+            const issuer = p.ebPoints.issuer && p.ebPoints.issuer.code ? p.ebPoints.issuer.code : "";
+            const acct = p.ebPoints.accountNumber || "";
+            out += `<div>Method: <strong>Points / Loyalty</strong></div>`;
+            if (issuer) out += `<div>Issuer: ${escapeHtml(issuer)}</div>`;
+            if (acct) out += `<div>Account: ${escapeHtml(acct)}</div>`;
+        }
+
+        // Generic fallback: print any other top-level fields
+        const otherKeys = Object.keys(p).filter(k => !["type","creditCard","ebPoints"].includes(k));
+        otherKeys.forEach(ok => {
+            const val = p[ok];
+            if (val && typeof val === "object") {
+                out += `<div>${escapeHtml(ok)}: ${escapeHtml(JSON.stringify(val))}</div>`;
+            } else if (val !== undefined) {
+                out += `<div>${escapeHtml(ok)}: ${escapeHtml(String(val))}</div>`;
+            }
+        });
+
+        out += `</div></div>`;
+    });
+    out += `</div>`;
+    return out;
+}
+
+
+function renderDocumentInformation(data) {
+    // Try multiple possible locations for documentInformation
+    const docInfo = (data && data.LEGACY && data.LEGACY.documentInformation)
+        || (data && data.documentInformation)
+        || null;
+
+    if (!docInfo || Object.keys(docInfo).length === 0) {
+        return `<p><em>No document information available.</em></p>`;
+    }
+
+    // Try to get passenger list for friendly names
+    const passengersArray = (data && data.LEGACY && data.LEGACY.passengersArray)
+        || (data && data.passengersArray)
+        || (data && data.passengers)
+        || [];
+
+    // Build a map passengerKey/id -> display name
+    const nameMap = {};
+    passengersArray.forEach(p => {
+        const key = p.passengerKey || p.uId || p.id || p.passengerId;
+        const display = (p.fullName || `${p.firstName || ''} ${p.lastName || ''}`).trim() || key || "Unknown passenger";
+        if (key) nameMap[key] = display;
+    });
+
+    let out = `<div class="document-info">`;
+
+    // Iterate over each passenger key in documentInformation
+    Object.keys(docInfo).forEach(passKey => {
+        const entry = docInfo[passKey];
+        const displayName = nameMap[passKey] || passKey;
+        out += `<div class="doc-passenger"><h4>${escapeHtml(displayName)}</h4>`;
+
+        // If there are flights array
+        if (Array.isArray(entry.flights) && entry.flights.length) {
+            entry.flights.forEach((f, idx) => {
+                out += `<div class="doc-flight"><strong>Flight document ${idx + 1}</strong>`;
+                // Type (e.g., e-billett)
+                if (f.type && (f.type.name || f.type.code)) {
+                    out += `<div>Type: ${escapeHtml(f.type.name || f.type.code)}</div>`;
+                }
+                // Numbers (ticket numbers)
+                if (Array.isArray(f.number) && f.number.length) {
+                    out += `<div>Ticket number(s): ${escapeHtml(f.number.join(", "))}</div>`;
+                } else if (f.number) {
+                    out += `<div>Ticket number: ${escapeHtml(String(f.number))}</div>`;
+                }
+                // DocumentNumber field (sometimes present)
+                if (Array.isArray(f.documentNumber) && f.documentNumber.length) {
+                    out += `<div>Document number(s): ${escapeHtml(f.documentNumber.join(", "))}</div>`;
+                } else if (f.documentNumber) {
+                    out += `<div>Document number: ${escapeHtml(String(f.documentNumber))}</div>`;
+                }
+
+                // If there are issuer/issuer info
+                if (f.issuer && (f.issuer.name || f.issuer.code)) {
+                    out += `<div>Issuer: ${escapeHtml(f.issuer.name || f.issuer.code)}</div>`;
+                } else if (f.issuer) {
+                    out += `<div>Issuer: ${escapeHtml(JSON.stringify(f.issuer))}</div>`;
+                }
+
+                // If there are associatedFlightSegments
+                if (Array.isArray(f.associatedFlightSegments) && f.associatedFlightSegments.length) {
+                    out += `<div>Associated segments: ${escapeHtml(f.associatedFlightSegments.join(", "))}</div>`;
+                }
+
+                // Any other useful top-level keys in flight object (safely)
+                const knownKeys = new Set(["type","number","documentNumber","issuer","associatedFlightSegments"]);
+                Object.keys(f).forEach(k => {
+                    if (!knownKeys.has(k)) {
+                        const val = f[k];
+                        if (val === null || val === undefined) return;
+                        if (typeof val === "object") {
+                            try {
+                                out += `<div>${escapeHtml(k)}: ${escapeHtml(JSON.stringify(val))}</div>`;
+                            } catch (e) { /* ignore */ }
+                        } else {
+                            out += `<div>${escapeHtml(k)}: ${escapeHtml(String(val))}</div>`;
+                        }
+                    }
+                });
+
+                out += `</div>`; // .doc-flight
+            });
+        } else {
+            // If entry itself contains ticket info directly
+            const keys = Object.keys(entry);
+            if (keys.length) {
+                out += `<div class="doc-generic">`;
+                keys.forEach(k => {
+                    const v = entry[k];
+                    if (v === null || v === undefined) return;
+                    if (Array.isArray(v)) {
+                        out += `<div>${escapeHtml(k)}: ${escapeHtml(v.join(", "))}</div>`;
+                    } else if (typeof v === "object") {
+                        try {
+                            out += `<div>${escapeHtml(k)}: ${escapeHtml(JSON.stringify(v))}</div>`;
+                        } catch (e) {}
+                    } else {
+                        out += `<div>${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`;
+                    }
+                });
+                out += `</div>`;
+            } else {
+                out += `<div><em>No detailed documents for this passenger.</em></div>`;
+            }
+        }
+
+        out += `</div>`; // .doc-passenger
+    });
+
+    out += `</div>`; // .document-info
+    return out;
+}
+
+// small helper to avoid injecting raw JSON into DOM
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("parseBtn").addEventListener("click", () => {
         const raw = document.getElementById("jsonInput").value.trim();
@@ -968,6 +1141,8 @@ html += `</div>`;
                         Dep: ${formatTimestamp(safe(seg, "scheduledDepartureLocal"))}<br>
                         Arr: ${formatTimestamp(safe(seg, "scheduledArrivalLocal"))}<br>
                         Duration: ${formatDuration(safe(seg, "duration"))}<br>
+                        Dep. Terminal: ${safe(seg,"departure.terminal")}<br>
+                        Arr. Terminal: ${safe(seg,"arrival.terminal")}<br>
                         Aircraft: ${safe(seg, "aircraft.code")} - ${safe(seg, "aircraft.name")} <br>
                         Reservation status: ${reservationStatusName}<br>
                         Booking class: ${bookingClass}<br>
@@ -1052,8 +1227,19 @@ html += `</div>`;
         html += `<div class="card"><h3>✈️ Flights</h3>No flight data</div>`;
     }
 
+    html += `<div class="card"><h3>Payment Info</h3>`;
+        //ADD FUNCTION FOR DISPLAYING PAYMENT INFO HERE
+
+        html += renderPaymentInfo(data);
+
+     
+        html += `</div>`;
 
 
+    html += `<div class="card"><h3>Document (ticket) info:</h3>`;
+        html += renderDocumentInformation(data);
+
+    html += `</div>`;
     
     /* -----------------------------
        SEATS (LEGACY seats if present)
